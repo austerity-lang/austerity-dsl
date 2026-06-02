@@ -1,0 +1,31 @@
+{
+  "simulation_id":   "traffic_demo_01",
+  "description":     "Four-way intersection controller — Junction 14",
+
+  "rules_file":      "examples/traffic/intersection.rules",
+  "state_file":      "examples/traffic/state.json",
+  "log_file":        "examples/traffic/logs/run.log",
+
+  "steps":           50,
+  "step_delay_ms":   500,
+
+  "seed":            42,
+
+  "yellow_duration":    5,
+  "clearance_duration": 3,
+
+  "queue_high_threshold":  10,
+  "queue_low_threshold":   3,
+  "cycle_extension_steps": 10,
+  "cycle_reduction_steps": 5,
+
+  "notes": {
+    "cycle_timer":        "cycle_timer counts down by 1 each step in the environment update — this is not a rule, it is the passage of simulated time. Rules react when cycle_timer reaches zero. The engine clamps cycle_timer at zero; it never goes negative.",
+    "cycle_time":         "cycle_time is the normal green phase duration in steps. cycle_timer is the live countdown. They start equal; the timer resets to cycle_time after each phase change.",
+    "yellow_duration":    "The yellow phase lasts a fixed number of steps defined here, not by cycle_time. It is intentionally short.",
+    "clearance_duration": "The all-red clearance interval between normal phase transitions. Gives vehicles already in the intersection time to clear before opposing traffic receives a green signal. Distinct from emergency ALL_RED, which is flagged separately by the emergency state variable.",
+    "clearance":          "The clearance flag in state distinguishes a normal all-red clearance interval from an emergency all-red. clearance = true means the intersection is between normal phases. clearance = false during ALL_RED means an emergency is active.",
+    "seed":               "Change this value to produce a different simulation run. The same seed always produces the same sequence of environment updates. The seed is written to the log at the start of every run.",
+    "step_delay_ms":      "Controls how fast the simulation runs on screen. 500ms is readable. Set to 0 to run instantly and only read the log."
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "intersection_id": "Junction_14",
+
+  "north_queue": 8,
+  "south_queue": 5,
+  "east_queue":  3,
+  "west_queue":  2,
+
+  "phase":        "NORTH_SOUTH_GREEN",
+  "cycle_time":   45,
+  "cycle_timer":  45,
+
+  "clearance":    false,
+  "emergency":    false
+}
