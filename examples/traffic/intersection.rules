@@ -1,7 +1,7 @@
 # intersection.rules
-# Austerity DSL — Version 0.1
-#
-# Traffic intersection controller — Junction 14
+# Austerity DSL — Traffic intersection controller — Junction 14
+
+AUSTERITY 0.1
 #
 # This file defines the decision logic for a four-way autonomous
 # traffic intersection. It is the complete rule set for the MVP demo.
