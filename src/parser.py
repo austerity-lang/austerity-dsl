@@ -35,8 +35,7 @@
 # The parser does not evaluate expressions. That is the engine's job.
 # The parser's job is to check structure and identifiers - not to run
 # the logic. This separation keeps both modules focused and testable.
-
-
+#
 # -----------------------------------------------------------------
 # Data structure: Rule
 # -----------------------------------------------------------------
@@ -46,11 +45,29 @@
 #               "phase = \"NORTH_SOUTH_GREEN\" AND cycle_timer = 0"
 #
 #   assignments - a list of raw THEN assignment strings, e.g.
-#                 ["phase = \"NORTH_SOUTH_YELLOW"", "cycle_timer = 5"]
+#                 ["phase = \"NORTH_SOUTH_YELLOW\", "cycle_timer = 5"]
 #
 # Keeping these as strings means the parser does minimal work and
 # the engine has full control over evaluation. The parser validates
 # structure and identifiers; the engine evaluates logic.
+#
+# DEFINE block (added v0.1, Session 4)
+# ------------------------------------
+# A DEFINE block may appear after the version declaration and before
+# the first RULE. It declares aliases for string, numeric or boolean
+# literlas. Aliases are expanded by textual substitution before any
+# rule is parsed. The engine and audit log always see the full values.
+#
+# Parse order:
+#   1. _read_file
+#   2. _tag_and_strip       - removes comments, preserves line numbers
+#   3. _check_version       - validates AUSTERITY 0.1 (or current )
+#   4. _parse_define_block  - extracts aliases; removes DEFINE lines
+#                             from tagged list so later passes ignore them
+#   5. _apply_substitutions - rewrites taggesd lines using alias table
+#   6. _group_into_blocks   - groups RULE...END sequences
+#   7. _parse_blocks        - produces Rule objects, validates identifiers
+
 
 import re
 
@@ -119,6 +136,8 @@ def parse(rules_file, state):
     raw_lines = _read_file(rules_file)
     tagged    = _tag_and_strip(raw_lines, rules_file)
     _check_version(tagged, rules_file)
+    aliases   = _parse_define_block(tagged, rules_file)
+    tagged    = _apply_substitutions(tagged, aliases)
     blocks    = _group_into_blocks(tagged, rules_file)
     rules     = _parse_blocks(blocks, state, rules_file)
     return rules
@@ -226,6 +245,184 @@ def _check_version(tagged, filename):
             f"  Fix      :  Make 'AUSTERITY 0.1' the first non-comment line of your file"
         )
     
+
+# -----------------------------------------------------------------------
+# DEFINE block - alias extraction and substitution
+# -----------------------------------------------------------------------
+
+def _parse_define_block(tagged, filename):
+    """
+    Find and extract the optional DEFINE block from the tagged line first.
+
+    If a DEFINE block is present, this function:
+      1. Validates its position (must come before any RULE).
+      2. Parses each alias definition (NAME = value).
+      3. Removes the DEFINE block lines from 'tagged' in place,
+         so that _group_into_blocks never sees them.
+      4. Returns the alias table as a dict mapping name -> value string.
+
+    If no DEFINE block is present, returns an empty dict and leaves
+    tagged unchanged.
+
+    Why remove the lines from tagged?
+    ---------------------------------
+    -group_into_blocks raises an error for any content it finds outside
+    a RULE block. DEFINE lives outside RULE blocks by design. Removing
+    it here is the cleanest way to keep _group_into_blocks simple and
+    focused on its own job.
+
+    Why return value strings, not evaluated values?
+    ------------------------------------------------
+    Substitution is purely textual. We replace the alias name with its
+    value string in the raw line text. The engine evaluates the result
+    later. This keeps the parser out of the business of type-converting
+    values - that remains the engines's responsibility.
+
+    Alias rules (errors caught here):
+      - DEFINE must appear before the first RULE.
+      - Only one DEFINE block is permitted per file.
+      - Each line inside DEFINE must be: IDENTIFIER = literal
+      - Alias names must be valid identifiers (letters, digits, _).
+      - Duplicate alias names within one DEFINE block are an error.
+      - Alias values must be non-empty.
+    """
+    define_start = None     # index into tagged where DEFINE was found
+    define_end   = None     # index into tagged where matching END was found
+    first_rule   = None     # index of the first RULE line, for position check
+
+    for i, (line_no, line) in enumerate(tagged):
+        if line.startswith("RULE"):
+            if first_rule is None:
+                first_rule = i 
+        if line == "DEFINE":
+            if first_rule is not None:
+                raise AusterityParseError(
+                    f"File '{filename}', line {line_no}: "
+                    f"DEFINE block must appear before the first RULE.\n"
+                    f"  Fix: Move the DEFINE block to just after 'AUSTERITY 0.1'."
+                )
+            if define_start is not None:
+                raise AusterityParseError(
+                    f"File '{filename}', line {line_no}: "
+                    f"only one DEFINE block is permitted per file.\n"
+                    f"  Fix: Merge all alias definitions into a single DEFINE block."
+                )
+            define_start = i
+        
+        if line == "END" and define_start is not None and define_end is None:
+            define_end = i
+
+    # No DEFINE block found - noting to do.
+    if define_start is None:
+        return{}
+    
+    # DEFINE opened but never closed.
+    if define_end is None:
+        line_no = tagged[define_start][0]
+        raise AusterityParseError(
+            f"File '{filename}', line {line_no}: "
+            f"DEFINE block has no closing END.\n"
+            f"  Fix: Add 'END' after the last alias definition."
+        )
+    
+    # Extract the lines between DEFINE and END (exclusive).
+    definition_lines = tagged[define_start + 1 : define_end]
+
+    if not definition_lines:
+        line_no = tagged[define_start][0]
+        raise AusterityParseError(
+            f"File '{filename}', line {line_no}: "
+            f"DEFINE block is empty.\n"
+            f"  Fix: Add at least one alias, e.g. 'NSG' = \"NORTH_SOUTH_GREEN\"'."
+        )
+    
+    # Parse each alias line.
+    aliases     = {}
+    seen_names  = set()
+
+    for line_no, line in definition_lines:
+        # Each line must contain exactly one '='
+        if '=' not in line:
+            raise AusterityParseError(
+                f"File '{filename}', line {line_no}: "
+                f"expected an alias definition (NAME = value) in DEFINE block.\n"
+                f"  Found: {line!r}\n"
+                f"  Fix: Each line in a DEFINE block must be 'ALIAS_NAME = value'."
+            )
+        
+        parts = line.split('=', 1)
+        name = parts[0].strip()
+        value= parts[1].strip()
+
+        # Validate the alias name
+        _validate_identifier(name, line_no, filename, context="alias name")
+
+        # Duplicate alias names in the same DEFINE block
+        if name in seen_names: 
+            raise AusterityParseError(
+                f"File '{filename}', line {line_no}: "
+                f"duplicate alias name '{name}' in DEFINE block.\n"
+                f"  Fix: Each alias name must appear only once."
+            )
+        
+        # Value must not be empty
+        if not value:
+            raise AusterityParseError(
+                f"File '{filename}', line {line_no}: "
+                f"alias '{name}' has not value.\n"
+                f"  Fix: Provide a value, e.g. '{name}' = \"SOME VALUE\"'."
+            )
+        
+        seen_names.add(name)
+        aliases[name] = value
+    
+    # Remove the DEFINE block from tagged (DEFINE line, definitions, END).
+    # We do this by slicing out that range.
+    # define_end + 1 because slice end is exclusive, and we want to
+    # include the END line itself in the removal
+    del tagged[define_start: define_end + 1]
+
+    return aliases
+
+def _apply_substitutions(tagged, aliases):
+    """
+    Replace alias names with their values in all tagged lines.
+
+    This is a straightforward find-and-replace pass over every line
+    that remains after the DEFINE block has been removed. By the time
+    _group_into_blocks and _parse_blocks rund, all aliases are gone.
+
+    Why whole-world replacement?
+    ----------------------------
+    We must not replace 'NS' inside 'NORTH_SOUTH' if 'NS' happens to
+    be a defined alias. We use a word-boundary regex so that 'NSG' is
+    only replaced when it appears as a standalone token - not as part
+    of a longer identifier. This is the same technique the engine uses
+    for AND / OR / NOT translation.
+
+    If no aliases are defined, this function returns tagged unchanged
+    (the dict is empty, the loop body never executes).
+    """
+    if not aliases:
+        return tagged
+    
+    # Build one regex pattern per alias, anchored at word boundaries.
+    # We sort by length descending so that longer aliases are tried
+    # first. This prevents a short alias ('NS') from matching the start
+    # of a longer one ('NSG') if both happen to be defined.
+    sorted_aliases = sorted(aliases.keys(), key=len, reverse=True)
+
+    result = []
+    for line_no, line in tagged:
+        for name in sorted_aliases:
+            # \b is a word boundary - matches between a word character
+            # and a non-word character. This ensures 'NSG' doesn't
+            # match inside 'XNSG' or 'NSGY'.
+            line = re.sub(r'\b' + re.escape(name) + r'\b', aliases[name], line)
+        result.append((line_no, line))
+
+    return result
+
 
 # -----------------------------------------------------------------------
 # Pass 1 - Group into raw blocks
@@ -466,10 +663,11 @@ def _validate_identifier(name, line_no, filename, context="identifier"):
     - Must start with a letter (a-z or A-Z)
     - May contain letters, digits and underscores
     - snake_case is the convention
+    - UPPERCASE is the convention for DEFINE aliases
 
     We do not check against reserved words here - that is a v0.2
     concern. In v0.1, reserved words are only reserved in syntax
-    position (RULE, WHEN, THEN, END, AND, OR, NOT, AUSTERITY).
+    position (RULE, WHEN, THEN, END, AND, OR, NOT, AUSTERITY, DEFINE).
     """
     if not name:
         raise AusterityParseError(
@@ -504,14 +702,17 @@ def _validate_condition_identifiers(condition, state, line_no, rule_name, filena
     Extract identifiers from a condition string and check each one
     against the state definition. (Safety principle P8.)
 
-    This is a conservative approach: we tokenise the condition roughly
-    by splitting on operators and whitespace, then check any token that
-    looks like an identifier (starts with a letter, not a keyword, not 
-    a string literal, not a number).
+    This runs after alias substitution, so condition strings contain
+    only expanded values - no alias names remain by this point.
+    String literal values (e.g. "NORT_SOUTH_GREEN") are stripped
+    before tokenising so their contents are never mistaken for 
+    identifiers
 
-    This will not catch every possible error - expression parsing is
-    the engine's job - but it catches the most common mistake: a typo
-    in a state key name that would otherwise silently never fire.
+    This is a conservative approach: we tokenise roughly by splitting
+    on operators and whitespace, then check any token that looks like
+    an identifier (starts with a letter, not a keyword, not a string
+    literal, not a number). It catches the most common mistakes - a
+    type in a state key name that would otherwise silently never fire.
     """
     # Remove string literals to avoid treating their contents as identifiers.
     # We replace quoted strings with a placeholder before tokenising.
@@ -581,3 +782,5 @@ def _strip_string_literals(text):
             i += 1
     return ''.join(result)
 
+# To run the parser in VS Code, start terminal and enter:
+# uv run python src/runner.py examples/traffic/config.json

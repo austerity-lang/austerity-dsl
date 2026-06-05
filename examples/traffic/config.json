@@ -6,8 +6,8 @@
   "state_file":      "examples/traffic/state.json",
   "log_file":        "examples/traffic/logs/run.log",
 
-  "steps":           50,
-  "step_delay_ms":   500,
+  "steps":           150,
+  "step_delay_ms":   200,
 
   "seed":            42,
 

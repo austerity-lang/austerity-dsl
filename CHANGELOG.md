@@ -14,7 +14,7 @@ current version are named here and carried forward — not silently omitted.
 
 ## [Unreleased]
 
-Planned for v0.2:
+Planned for v0.2 — language and runtime:
 
 - Static analysis for rule ordering warnings (G1)
 - Reachability analysis for dead rules (G3)
@@ -29,7 +29,125 @@ Planned for v0.2:
 - Relaxed CONST blocks allowing expressions (G2)
 - Complexity linting for WHEN conditions (G5)
 - Formal continuous risk management framework (design.md section 12)
-- Fix for queue extension rules firing every step on heavy traffic
+- Rule aliasing and named rule groups (inter-rule references)
+- Real sensor data input interface to replace seeded simulation
+- Log redundancy and watchdog process for production deployments
+
+Planned for Cycle 2 — research and publication:
+
+- Whitepaper: Austerity DSL — a risk-informed design methodology for
+  safety-critical domain-specific languages. Submission target: ArXiv cs.PL.
+- Literature review: 2003 Northeast Blackout Task Force report; Leveson (2011);
+  Fowler (2010); Mernik et al. (2005); Therac-25 forensics; Lee (2006).
+- Case study: mapping Task Force findings to Austerity design principles —
+  which findings v0.1 addresses, which are deferred to v0.2 or later.
+- v0.2 design goals to be re-examined after whitepaper findings are consolidated.
+
+---
+
+## [0.1.1] — 2026-06-05
+
+Correctness fixes and language extension to the MVP.
+All changes are backward-compatible. No syntax breaking changes.
+The Junction 14 simulation produces verified output across 150 steps
+with seed 42, including a full emergency cycle and two queue extension events.
+
+### Added — Language
+
+- `DEFINE` block for string literal aliases.
+  Aliases are expanded by the parser at parse time before any rule is
+  evaluated. The engine and audit log always see the full expanded values.
+  Aliases are a writing convenience only — they have no runtime presence.
+  Syntax: `DEFINE / NAME = value / END`, placed after `AUSTERITY 0.1`
+  and before the first `RULE`. One `DEFINE` block per file.
+  Conventional style: alias names in UPPERCASE to distinguish them
+  visually from state keys (snake_case) and rule names (snake_case).
+
+### Changed — Parser (`parser.py`)
+
+- Added `_parse_define_block()`: extracts and validates the optional
+  `DEFINE` block from the tagged line list. Removes DEFINE lines from
+  the tagged list before `_group_into_blocks` runs, so the block
+  grouper requires no changes. Errors caught: DEFINE after first RULE,
+  duplicate DEFINE blocks, empty DEFINE block, duplicate alias names,
+  missing alias value, missing END.
+- Added `_apply_substitutions()`: replaces alias names with their value
+  strings in all tagged lines after DEFINE extraction. Uses whole-word
+  regex replacement sorted longest-first to prevent partial matches
+  (e.g. `NS` must not match inside `NSG`).
+- Updated `parse()` call sequence: `_parse_define_block()` and
+  `_apply_substitutions()` inserted between `_check_version()` and
+  `_group_into_blocks()`. All downstream functions are unchanged.
+
+### Changed — Engine (`engine.py`)
+
+- `_apply_assignments()`: added `cycle_timer` clamp at zero after all
+  assignments are applied. Previously the clamp existed only in
+  `apply_environment_update()`. A rule subtracting from `cycle_timer`
+  (e.g. `reduce_cycle_on_low_traffic`) could push the timer negative,
+  which appeared in the audit log as `timer: -4`. The timer now clamps
+  to zero consistently after both environment updates and rule mutations.
+
+### Changed — Demo: Junction 14 (`intersection.rules`)
+
+- Added `DEFINE` block with five aliases:
+  `NSG`, `NSY`, `EWG`, `EWY`, `AR` — expanding to the full phase name
+  strings. All eleven rules updated to use aliases in WHEN and THEN clauses.
+- `extend_north_south_on_heavy_load`: added ceiling condition
+  `AND cycle_timer < 20`. Without this, the rule fired every step the
+  north queue exceeded threshold, growing the timer without bound.
+  The ceiling limits each extension event to a single firing per ~10-step
+  window, preventing green phase starvation of the opposing direction.
+- `extend_east_west_on_heavy_load`: same ceiling fix as above.
+- `reduce_cycle_on_low_traffic`: added phase guard
+  `(phase = NSG OR phase = EWG)`. Previously this rule fired during
+  yellow and clearance phases, shortening safety-critical fixed-duration
+  intervals. Yellow and clearance durations are now protected.
+- Added inline comments to `emergency_recovery` explaining that the
+  `clearance = false` condition is what distinguishes post-emergency
+  recovery from normal clearance intervals, and that firing on every
+  step of ALL_RED-with-no-clearance is the intended behaviour.
+
+### Changed — Config (`config.json`)
+
+- `steps` increased from 50 to 150. The previous value was insufficient
+  to observe a full double phase cycle or an emergency event.
+- `step_delay_ms` reduced from 500 to 200. Faster display for demos
+  while remaining readable.
+
+### Fixed
+
+- Negative `cycle_timer` values now correctly clamp to zero after rule
+  mutations, not only after environment updates. Previously `timer: -4`
+  could appear in the audit log at step 9 of seed-42 run.
+- Queue extension rules no longer fire unboundedly on sustained heavy
+  traffic. The ceiling condition `AND cycle_timer < 20` resolves the
+  known issue documented in v0.1.0.
+
+### Resolved Known Issues
+
+- **Queue extension rules fire every step on heavy traffic.** Resolved
+  by ceiling condition in both extension rules. Removed from known issues.
+
+### Known Issues (carried forward)
+
+- **Expression evaluation uses Python `eval()` with restricted context.**
+  Division by zero in THEN expressions remains possible at runtime (G9).
+  A full expression parser is the v0.2 path.
+
+- **Rule ordering is semantically significant with no static warning (G1).**
+  `clearance_to_east_west_green` and `clearance_to_north_south_green`
+  share identical WHEN conditions. Last-declared wins. Correct and
+  documented, but a static analysis warning is planned for v0.2.
+
+- **Seed prompt does not accept a new seed value directly.**
+  Entering a number at the `[Y/S/N]` prompt instead of `S` falls through
+  to the default seed. Minor UX issue in `runner.py`. Deferred to v0.2.
+
+- **Audit log has no redundancy.**
+  Log writes to a single file with no replication or watchdog. Acceptable
+  for MVP demo; a production deployment would require log redundancy.
+  Deferred — this is an infrastructure concern, not a language concern.
 
 ---
 

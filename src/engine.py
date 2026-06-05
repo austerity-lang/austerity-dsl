@@ -271,9 +271,20 @@ def _apply_assignments(rule, state):
     the last rule to fire wins - this is enforced by the order of
     calls from evaluate step, which processes rules in declaration
     order. The last assignment to a key in the step is the winner.
+
+    After all assignments, cycle_timer is clamped at zero.
+    A rule that substracts from cycle_timer (e.g. reduce_cycle_on_low_traffic)
+    must not be able to push the timer negative. This mirrors the 
+    same guarantee in appy_environment_update
     """
     for assignment in rule.assignments:
         _apply_single_assignment(rule, assignment, state)
+
+    # Clamp cycle_timer at zero after all assignments.
+    # Rules that substract form cycle_timer (e.g. reduce_cycle_on_low_traffic)
+    # must not be able to pus the timer negative.
+    if 'cycle_timer' in state and state['cycle_timer'] < 0:
+        state['cycle_timer'] = 0
 
 
 def _apply_single_assignment(rule, assignment, state):

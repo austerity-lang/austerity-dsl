@@ -2,6 +2,26 @@
 # Austerity DSL — Traffic intersection controller — Junction 14
 
 AUSTERITY 0.1
+
+# ----------------------------------------------------------------
+# DEFINE block - aliases for phase name string literals
+#
+# These aliases exist only in this source file.
+# The parser expands them before any rule is evaluated.
+# The engine and the audit log always use the full string values.
+#
+# Convetion: aliases are UPPERCASE to distinguish them visually
+# from state keys (which are lowercase_snake_case).
+# ----------------------------------------------------------------
+
+DEFINE
+    NSG = "NORTH_SOUTH_GREEN"
+    NSY = "NORTH_SOUTH_YELLOW"
+    EWG = "EAST_WEST_GREEN"
+    EWY = "EAST_WEST_YELLOW"
+    AR = "ALL_RED"
+END
+
 #
 # This file defines the decision logic for a four-way autonomous
 # traffic intersection. It is the complete rule set for the MVP demo.
@@ -31,15 +51,11 @@ AUSTERITY 0.1
 #   clearance = true  — normal interval between phase transitions.
 #                       All directions hold red briefly so vehicles
 #                       already in the intersection can clear safely.
-#                       Trucks, long vehicles and late crossers are
-#                       the primary beneficiaries of this interval.
 #
 #   emergency = true  — an emergency vehicle is approaching.
 #                       All directions hold red until emergency clears.
 #
 # These two conditions are mutually exclusive by design.
-# The clearance and emergency flags in state make the distinction
-# unambiguous for both the engine and the human reading the log.
 #
 # Rules: 11 total
 #   Section 1 — Normal phase rotation   (6 rules)
@@ -55,53 +71,53 @@ AUSTERITY 0.1
 # Yellow phases transition to an all-red clearance interval before
 # the opposing direction receives a green signal.
 #
-# The clearance flag is set to true when entering a normal ALL_RED
-# interval, and back to false when leaving it. This allows the
-# emergency rules in Section 3 to remain unambiguous.
+# The clearance flag is set to true when entering ALL_RED and back
+# back to false when leaving it. This keeps the # emergency rules  in
+# Section 3 unambiguous - they only act when clearance = false.
 # ---------------------------------------------------------------
 
 RULE north_south_green_to_yellow
-WHEN phase = "NORTH_SOUTH_GREEN" AND cycle_timer = 0
+WHEN phase = NSG AND cycle_timer = 0
 THEN
-    phase       = "NORTH_SOUTH_YELLOW"
+    phase       = NSY
     cycle_timer = 5
 END
 
 RULE north_south_yellow_to_clearance
-WHEN phase = "NORTH_SOUTH_YELLOW" AND cycle_timer = 0
+WHEN phase = NSY AND cycle_timer = 0
 THEN
-    phase       = "ALL_RED"
+    phase       = AR
     clearance   = true
     cycle_timer = 3
 END
 
 RULE clearance_to_east_west_green
-WHEN phase = "ALL_RED" AND clearance = true AND cycle_timer = 0
+WHEN phase = AR AND clearance = true AND cycle_timer = 0
 THEN
-    phase       = "EAST_WEST_GREEN"
+    phase       = EWG
     clearance   = false
     cycle_timer = cycle_time
 END
 
 RULE east_west_green_to_yellow
-WHEN phase = "EAST_WEST_GREEN" AND cycle_timer = 0
+WHEN phase = EWG AND cycle_timer = 0
 THEN
-    phase       = "EAST_WEST_YELLOW"
+    phase       = EWY
     cycle_timer = 5
 END
 
 RULE east_west_yellow_to_clearance
-WHEN phase = "EAST_WEST_YELLOW" AND cycle_timer = 0
+WHEN phase = EWY AND cycle_timer = 0
 THEN
-    phase       = "ALL_RED"
+    phase       = AR
     clearance   = true
     cycle_timer = 3
 END
 
 RULE clearance_to_north_south_green
-WHEN phase = "ALL_RED" AND clearance = true AND cycle_timer = 0
+WHEN phase = AR AND clearance = true AND cycle_timer = 0
 THEN
-    phase       = "NORTH_SOUTH_GREEN"
+    phase       = NSG
     clearance   = false
     cycle_timer = cycle_time
 END
@@ -110,74 +126,79 @@ END
 # ---------------------------------------------------------------
 # SECTION 2 — Queue pressure adjustments
 #
-# These rules extend or shorten the active green phase depending
-# on how much traffic is waiting. They only fire during green
-# phases — yellow and clearance phases are never extended.
+# Extension rules fire during a green phase when the queue for
+# that direcetion is heavy. They add time to cycle_timer, giving
+# the heavy direction longer to drain.
 #
-# Extension adds steps directly to cycle_timer when a queue
-# is heavy. It does not change cycle_time, which remains the
-# default reset value for the next full phase.
+# Ceiling condition (cycle_timer < 20): each extension rule fires
+# at most once or twice per phase. Without a ceiling, the rule
+# would add 10 steps every step the queue stayed above treshold,
+# growing the timer without bound and starving the other direction.
+# 20 was chosen as roughly half of the default cycle_time (45).
 #
-# Reduction fires when all queues are light, trimming the
-# remaining timer so the cycle moves on sooner. The engine
-# clamps cycle_timer at zero — it will never go negative
-# regardless of how aggressively this rule fires.
+# Reduction fires when all queues are light, but only during green
+# phases. Yellow and clearance phases have fixed safety durations
+# and must never be shortened by traffic pressure rules.
+# The engine's zero-clamp ensures cycle_timer never goes negative
+# even if this rule fires repeatedly near the end of a phase.
 # ---------------------------------------------------------------
 
 RULE extend_north_south_on_heavy_load
-WHEN phase = "NORTH_SOUTH_GREEN" AND north_queue > 10
+WHEN phase = NSG AND north_queue > 10 AND cycle_timer < 20
 THEN
     cycle_timer = cycle_timer + 10
 END
 
 RULE extend_east_west_on_heavy_load
-WHEN phase = "EAST_WEST_GREEN" AND east_queue > 10
+WHEN phase = EWG AND east_queue > 10 AND cycle_timer < 20
 THEN
     cycle_timer = cycle_timer + 10
 END
 
 RULE reduce_cycle_on_low_traffic
-WHEN north_queue < 3 AND south_queue < 3 AND east_queue < 3 AND west_queue < 3
+WHEN (phase = NSG OR phase = EWG) AND north_queue < 3 
+    AND south_queue < 3 AND east_queue < 3 AND west_queue < 3
 THEN
     cycle_timer = cycle_timer - 5
 END
 
-
 # ---------------------------------------------------------------
 # SECTION 3 — Emergency response
 #
-# These two rules handle the full emergency lifecycle.
-#
 # emergency_override fires every step that emergency = true.
-# It forces ALL_RED, zeroes the timer, and ensures clearance
-# remains false — distinguishing this state from a normal
-# clearance interval. No rotation rule can fire while this
-# rule is active, because they all test for specific phases
-# or for clearance = true.
+# It forces ALL_RED, zeroes the timer and keeps clearance = false
+# — distinguishing this emergency hold from a normal clearance
+# interval. No rotation rule can fire while this is active,
+# because they all test for specific phase or clearance = true.
 #
-# emergency_recovery fires on the first step after emergency
-# clears. It returns the intersection to NORTH_SOUTH_GREEN
-# and resets the timer to a full cycle, resuming normal
-# operation cleanly from a known state.
+# emergency_recovery fires on the first step after the emergency
+# flag clears. Its condition is:
+#   emergency = false AND phase = AR AND clearance = false
+#
+# The clearance = false guard is what makes this unambiguous.
+# During a normal clearance interval, clearance = true, so this
+# rule cannot fire. After an emergency, clearance remains false
+# (set by emergency_override), so this rule fires exactly once
+# on the step the emergency ends. This is the intended behaviour.
 #
 # Declaration order note: emergency_override is declared before
-# emergency_recovery. Because last-declared wins on key conflicts,
-# recovery takes precedence if both conditions were simultaneously
-# true — which cannot happen by definition, but the ordering is
-# documented here for clarity and future maintainability.
+# emergency_recovery. Because last_declared wins on key conflicts,
+# recovery takes precedence if both were somehow simultaneously
+# true - which cannot happen by construction, but the ordering
+# is documented here for future maintainability.
 # ---------------------------------------------------------------
 
 RULE emergency_override
 WHEN emergency = true
 THEN
-    phase       = "ALL_RED"
+    phase       = AR
     clearance   = false
     cycle_timer = 0
 END
 
 RULE emergency_recovery
-WHEN emergency = false AND phase = "ALL_RED" AND clearance = false
+WHEN emergency = false AND phase = AR AND clearance = false
 THEN
-    phase       = "NORTH_SOUTH_GREEN"
+    phase       = NSG
     cycle_timer = cycle_time
 END
